@@ -1,0 +1,80 @@
+# Environment & Credentials
+.env
+.env.local
+.env.*.local
+credentials/
+gcp-service-account-key.json
+service-account-key.json
+*-sa.json
+*-key.json
+
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!terraform/example.tfvars
+
+# dbt
+target/
+dbt_packages/
+dbt/target/
+dbt/dbt_packages/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.venv
+venv/
+ENV/
+env/
+.vscode/
+.idea/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
+CLAUDE.md
+Claude.MD
+
+# Project-specific
+data/
+output/
+*.csv
+!src/data/**/*.csv
