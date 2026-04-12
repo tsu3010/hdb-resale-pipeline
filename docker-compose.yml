@@ -1,0 +1,66 @@
+# Kestra local orchestration setup for HDB Resale Pipeline
+# Credentials approach: the project directory (including .env and credentials/)
+# is mounted directly into the Kestra container and each task container.
+# No secrets configuration needed — tasks reuse the existing .env file.
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: kestra
+      POSTGRES_USER: kestra
+      POSTGRES_PASSWORD: kestra
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kestra"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kestra:
+    image: kestra/kestra:latest
+    pull_policy: always
+    user: "root"
+    command: server standalone
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - kestra-data:/app/storage
+      - /var/run/docker.sock:/var/run/docker.sock  # required for Docker task runner
+      - /tmp/kestra-wd:/tmp/kestra-wd
+      - .:/opt/hdb-pipeline                        # mount full project into Kestra
+    ports:
+      - "8080:8080"
+    environment:
+      # Pass host project path so flows can mount it into task containers
+      HOST_PROJECT_PATH: ${PWD}
+      KESTRA_CONFIGURATION: |
+        datasources:
+          postgres:
+            url: jdbc:postgresql://postgres:5432/kestra
+            driverClassName: org.postgresql.Driver
+            username: kestra
+            password: kestra
+        kestra:
+          server:
+            basicAuth:
+              enabled: true
+              username: "admin@kestra.io"
+              password: Admin1234!
+          repository:
+            type: postgres
+          storage:
+            type: local
+            local:
+              basePath: "/app/storage"
+          queue:
+            type: postgres
+          tasks:
+            tmpDir:
+              path: /tmp/kestra-wd
+
+volumes:
+  postgres-data:
+  kestra-data:

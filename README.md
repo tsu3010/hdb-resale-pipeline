@@ -20,8 +20,8 @@
 - [x] dbt staging models: `stg_hdb_prices`, `stg_locations`
 - [x] dbt mart models: `mart_hdb_by_month`, `mart_affordability_index`, `mart_price_trends`
 - [x] 24 dbt tests passing across staging and mart layers
-- [x] Looker Studio dashboard (in progress)
-- [ ] Kestra orchestration flows
+- [x] Looker Studio dashboard
+- [x] Kestra orchestration flows (backfill + weekly incremental)
 
 ---
 
@@ -78,6 +78,8 @@ Orchestration is handled by Kestra, with infrastructure provisioned via Terrafor
 ---
 
 ## Architecture
+
+<!-- TODO: Insert architecture diagram image here -->
 
 ```text
 data.gov.sg API (HDB resale data)
@@ -137,7 +139,9 @@ hdb-resale-pipeline/
 │           ├── mart_affordability_index.sql
 │           └── mart_price_trends.sql
 │
-└── kestra/flows/             # Orchestration (coming soon)
+└── kestra/flows/             # Orchestration flows
+    ├── backfill_flow.yml     # One-time full backfill
+    └── incremental_flow.yml  # Weekly incremental load
 ```
 
 ---
@@ -176,7 +180,14 @@ Geographic enrichment is done via the [OneMap API](https://www.onemap.gov.sg/api
 
 ### 4. Orchestration (Kestra)
 
-Coming soon — flows will manage the backfill and weekly incremental pipeline end-to-end.
+Two flows manage the pipeline end-to-end via Kestra, running in Docker locally:
+
+| Flow | File | Purpose |
+| ---- | ---- | ------- |
+| `hdb_backfill` | `kestra/flows/backfill_flow.yml` | One-time full load with `WRITE_TRUNCATE` |
+| `hdb_incremental` | `kestra/flows/incremental_flow.yml` | Weekly `WRITE_APPEND`, geocodes only new streets |
+
+Both flows are **self-contained** — Python scripts and dbt models are embedded inline via `inputFiles`. No namespace file uploads or Docker volume mounts required. All credentials are stored in the Kestra KV store.
 
 ### 5. Visualization
 
@@ -210,6 +221,10 @@ dbt test --profiles-dir .
 
 Connects to BigQuery dataset `dbt_sthyagaraj_marts`.
 
+<!-- TODO: Insert dashboard screenshot 1 (Price Overview page) here -->
+
+<!-- TODO: Insert dashboard screenshot 2 (Map page) here -->
+
 ---
 
 ## Steps to Reproduce
@@ -232,13 +247,31 @@ Connects to BigQuery dataset `dbt_sthyagaraj_marts`.
 git clone <repo-url>
 cd hdb-resale-pipeline
 cp .env.example .env
-# Edit .env — fill in GCP, data.gov.sg, and OneMap credentials
 ```
+
+Edit `.env` and fill in the following:
+
+| Variable | Description |
+| --- | --- |
+| `GCP_PROJECT_ID` | Your GCP project ID |
+| `GCP_REGION` | e.g. `asia-southeast1` |
+| `GCP_SERVICE_ACCOUNT_KEY_PATH` | Path to SA key, e.g. `./credentials/hdb-pipeline-sa.json` |
+| `BQ_DATASET_RAW` | `raw_hdb` |
+| `BQ_DATASET_DBT` | `dbt_sthyagaraj` |
+| `GCS_BUCKET_RAW` | Your GCS bucket name from Terraform output |
+| `DATA_GOV_SG_API_KEY` | From data.gov.sg developer portal |
+| `ONEMAP_EMAIL` | Your OneMap account email |
+| `ONEMAP_PASSWORD` | Your OneMap account password |
 
 ### 2. Install Dependencies
 
 ```bash
+# Install Python dependencies
 uv sync
+
+# Install dbt-fusion separately (not a Python package)
+# Follow: https://github.com/dbt-labs/dbt-fusion
+# Verify: dbt --version
 ```
 
 ### 3. Create GCP Project & Enable APIs
@@ -264,6 +297,7 @@ terraform plan
 terraform apply
 
 # Save the service account key
+mkdir -p ../credentials
 terraform output -raw service_account_key_private | base64 --decode > ../credentials/hdb-pipeline-sa.json
 cd ..
 ```
@@ -277,8 +311,9 @@ cd ..
 uv run python src/ingestion/hdb_loader.py --backfill
 
 # Geocode street names via OneMap API → GCS + BigQuery
+# Replace <bucket> with your GCS_BUCKET_RAW value and <date> with today's date (YYYYMMDD)
 uv run python src/ingestion/location_enricher.py \
-    --input gs://<GCS_BUCKET_RAW>/hdb_resale/hdb_resale_YYYYMMDD.csv
+    --input gs://<bucket>/hdb_resale/hdb_resale_<date>.csv
 ```
 
 ### 6. Run dbt Transformations
@@ -288,14 +323,39 @@ uv run python src/ingestion/location_enricher.py \
 ```bash
 cd dbt
 dbt debug --profiles-dir .       # verify BigQuery connection
-dbt run --profiles-dir .         # build all models
+dbt run --profiles-dir .         # builds 5 models across 2 datasets:
+                                 #   dbt_sthyagaraj_staging (stg_hdb_prices, stg_locations)
+                                 #   dbt_sthyagaraj_marts   (mart_hdb_by_month, mart_affordability_index, mart_price_trends)
 dbt test --profiles-dir .        # run 24 tests
 cd ..
 ```
 
 ### 7. Setup Kestra Orchestration
 
-Coming soon.
+**Start Kestra:**
+
+```bash
+docker-compose up -d
+```
+
+Kestra UI will be available at [http://localhost:8080](http://localhost:8080).
+
+**Configure credentials:**
+
+All credentials are stored in the Kestra KV store (not as files or env vars). In the Kestra UI, navigate to **Namespaces** → `hdb_resale` → **KV Store** and add entries for GCP project details, GCS bucket, BigQuery dataset, API keys, and the full GCP service account JSON. See `.env.example` for the full list of required values.
+
+**Load and run the backfill flow:**
+
+1. Go to **Flows** → **Create**
+2. Paste the contents of `kestra/flows/backfill_flow.yml`
+3. Save, then click **Execute**
+
+The flow runs 4 tasks in sequence: `load_hdb_data` → `geocode_locations` → `dbt_run` → `dbt_test`.
+
+**Load the incremental flow (optional):**
+
+1. Repeat the above using `kestra/flows/incremental_flow.yml`
+2. The weekly schedule trigger is disabled by default — enable once backfill is verified complete
 
 ### 8. View Dashboard
 
@@ -305,7 +365,6 @@ Open the [Looker Studio Dashboard](https://lookerstudio.google.com/reporting/91a
 
 ## Known Limitations & Future Work
 
-- **Kestra orchestration**: flows not yet implemented
 - **Proximity enrichment**: MRT/school proximity data deferred to Phase 2
 - **Real-time updates**: Weekly batch only — no streaming
 - **Forecasting**: Price prediction/ML models not in MVP scope

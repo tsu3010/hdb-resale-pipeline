@@ -1,0 +1,835 @@
+id: hdb_backfill
+namespace: hdb_resale
+
+description: |
+  Full backfill of HDB resale pipeline:
+    1. Fetch HDB resale data from data.gov.sg API -> GCS + BigQuery (raw_hdb.hdb_resale)
+    2. Geocode street names via OneMap API -> GCS + BigQuery (raw_hdb.hdb_locations)
+    3. Run dbt models (staging + marts)
+    4. Run dbt tests
+
+  All credentials are read from Kestra KV store (namespace: hdb_resale).
+  Python scripts run inline via Commands + inputFiles - no namespace file uploads needed.
+
+  KV store keys required:
+    GCP_PROJECT_ID, GCP_REGION, GCS_BUCKET_RAW, BQ_DATASET_RAW,
+    DATA_GOV_SG_API_KEY, ONEMAP_EMAIL, ONEMAP_PASSWORD, GCP_SA_KEY_JSON
+
+pluginDefaults:
+  - type: io.kestra.plugin.gcp
+    values:
+      serviceAccount: "{{ kv('GCP_SA_KEY_JSON') }}"
+      projectId: "{{ kv('GCP_PROJECT_ID') }}"
+      location: "{{ kv('GCP_REGION') }}"
+
+tasks:
+  - id: load_hdb_data
+    type: io.kestra.plugin.scripts.python.Commands
+    description: "Fetch HDB resale data from data.gov.sg API and load into GCS + BigQuery"
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: python:3.12-slim
+    env:
+      GCP_PROJECT_ID: "{{ kv('GCP_PROJECT_ID') }}"
+      GCP_REGION: "{{ kv('GCP_REGION') }}"
+      GCS_BUCKET_RAW: "{{ kv('GCS_BUCKET_RAW') }}"
+      BQ_DATASET_RAW: "{{ kv('BQ_DATASET_RAW') }}"
+      DATA_GOV_SG_API_KEY: "{{ kv('DATA_GOV_SG_API_KEY') }}"
+      GCP_SERVICE_ACCOUNT_KEY_PATH: /tmp/sa-key.json
+      GCP_SA_KEY_JSON: "{{ kv('GCP_SA_KEY_JSON') }}"
+    beforeCommands:
+      - printf '%s' "$GCP_SA_KEY_JSON" > /tmp/sa-key.json
+      - pip install -q google-cloud-bigquery google-cloud-storage pandas requests pyarrow
+    inputFiles:
+      hdb_loader.py: |
+        import io
+        import os
+        import time
+        from datetime import datetime, timezone
+
+        import pandas as pd
+        import requests
+        from google.cloud import bigquery, storage
+        from google.cloud.bigquery import LoadJobConfig, SchemaField, TimePartitioning
+        from google.oauth2 import service_account
+
+        GCP_PROJECT_ID = os.environ["GCP_PROJECT_ID"]
+        SA_KEY_PATH = os.environ["GCP_SERVICE_ACCOUNT_KEY_PATH"]
+        BQ_DATASET_RAW = os.environ["BQ_DATASET_RAW"]
+        GCS_BUCKET_RAW = os.environ["GCS_BUCKET_RAW"]
+        DATA_GOV_SG_API_KEY = os.environ["DATA_GOV_SG_API_KEY"]
+
+        HDB_DATASET_ID = "d_8b84c4ee58e3cfc0ece0d773c8ca6abc"
+        HDB_API_INITIATE_URL = f"https://api-open.data.gov.sg/v1/public/api/datasets/{HDB_DATASET_ID}/initiate-download"
+        HDB_API_POLL_URL = f"https://api-open.data.gov.sg/v1/public/api/datasets/{HDB_DATASET_ID}/poll-download"
+
+        _GCP_SCOPES = [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/devstorage.read_write",
+        ]
+
+        BQ_TABLE = "hdb_resale"
+        BQ_SCHEMA = [
+            SchemaField("month", "STRING"),
+            SchemaField("town", "STRING"),
+            SchemaField("flat_type", "STRING"),
+            SchemaField("block", "STRING"),
+            SchemaField("street_name", "STRING"),
+            SchemaField("storey_range", "STRING"),
+            SchemaField("floor_area_sqm", "STRING"),
+            SchemaField("flat_model", "STRING"),
+            SchemaField("lease_commence_date", "STRING"),
+            SchemaField("remaining_lease", "STRING"),
+            SchemaField("resale_price", "STRING"),
+            SchemaField("ingested_at", "TIMESTAMP"),
+        ]
+        EXPECTED_COLUMNS = {
+            "month", "town", "flat_type", "block", "street_name",
+            "storey_range", "floor_area_sqm", "flat_model",
+            "lease_commence_date", "remaining_lease", "resale_price",
+        }
+
+        def get_credentials():
+            return service_account.Credentials.from_service_account_file(
+                SA_KEY_PATH, scopes=_GCP_SCOPES
+            )
+
+        def fetch_hdb_data():
+            headers = {"Content-Type": "application/json", "x-api-key": DATA_GOV_SG_API_KEY}
+            s = requests.Session()
+            print("Initiating download from data.gov.sg API...")
+            resp = s.get(HDB_API_INITIATE_URL, headers=headers, json={}, timeout=30)
+            resp.raise_for_status()
+            print(resp.json().get("data", {}).get("message", ""))
+            print("Polling for download readiness...")
+            for attempt in range(30):
+                time.sleep(3)
+                poll_resp = s.get(HDB_API_POLL_URL, headers=headers, json={}, timeout=30)
+                poll_resp.raise_for_status()
+                download_url = poll_resp.json().get("data", {}).get("url")
+                if download_url:
+                    print(f"  Ready after {attempt + 1} poll(s).")
+                    break
+                print(f"  Still processing... ({attempt + 1}/30)")
+            else:
+                raise RuntimeError("Download did not become ready after 90 seconds.")
+            print(f"Downloading CSV from {download_url[:60]}...")
+            csv_resp = requests.get(download_url, timeout=120)
+            csv_resp.raise_for_status()
+            df = pd.read_csv(io.StringIO(csv_resp.text))
+            print(f"Fetched {len(df):,} records.")
+            missing = EXPECTED_COLUMNS - set(df.columns)
+            if missing:
+                raise ValueError(f"Downloaded CSV missing expected columns: {missing}")
+            return df
+
+        df = fetch_hdb_data()
+        df["ingested_at"] = datetime.now(timezone.utc)
+        source_cols = [f.name for f in BQ_SCHEMA if f.name != "ingested_at"]
+        df[source_cols] = df[source_cols].astype(str)
+        df = df[source_cols + ["ingested_at"]]
+        print(f"Prepared {len(df):,} rows.")
+
+        creds = get_credentials()
+        gcs_path = f"hdb_resale/hdb_resale_{datetime.now().strftime('%Y%m%d')}.csv"
+        gcs_client = storage.Client(project=GCP_PROJECT_ID, credentials=creds)
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        csv_bytes = buf.getvalue().encode("utf-8")
+        gcs_client.bucket(GCS_BUCKET_RAW).blob(gcs_path).upload_from_string(csv_bytes, content_type="text/csv")
+        gcs_uri = f"gs://{GCS_BUCKET_RAW}/{gcs_path}"
+        print(f"Uploaded {len(csv_bytes) / 1024 / 1024:.1f} MB to {gcs_uri}")
+
+        bq_client = bigquery.Client(project=GCP_PROJECT_ID, credentials=creds)
+        table_ref = f"{GCP_PROJECT_ID}.{BQ_DATASET_RAW}.{BQ_TABLE}"
+        job_config = LoadJobConfig(
+            schema=BQ_SCHEMA,
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+            time_partitioning=TimePartitioning(field="ingested_at"),
+        )
+        job = bq_client.load_table_from_dataframe(df, table_ref, job_config=job_config)
+        job.result()
+        print(f"Loaded {job.output_rows:,} rows into {table_ref} (WRITE_TRUNCATE).")
+    commands:
+      - python hdb_loader.py
+
+  - id: geocode_locations
+    type: io.kestra.plugin.scripts.python.Commands
+    description: "Geocode unique street names via OneMap API and load into GCS + BigQuery"
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: python:3.12-slim
+    env:
+      GCP_PROJECT_ID: "{{ kv('GCP_PROJECT_ID') }}"
+      GCP_REGION: "{{ kv('GCP_REGION') }}"
+      GCS_BUCKET_RAW: "{{ kv('GCS_BUCKET_RAW') }}"
+      BQ_DATASET_RAW: "{{ kv('BQ_DATASET_RAW') }}"
+      ONEMAP_EMAIL: "{{ kv('ONEMAP_EMAIL') }}"
+      ONEMAP_PASSWORD: "{{ kv('ONEMAP_PASSWORD') }}"
+      GCP_SERVICE_ACCOUNT_KEY_PATH: /tmp/sa-key.json
+      GCP_SA_KEY_JSON: "{{ kv('GCP_SA_KEY_JSON') }}"
+    beforeCommands:
+      - printf '%s' "$GCP_SA_KEY_JSON" > /tmp/sa-key.json
+      - pip install -q google-cloud-bigquery google-cloud-storage pandas requests pyarrow
+    inputFiles:
+      location_enricher.py: |
+        import io
+        import os
+        import time
+        from datetime import datetime, timezone
+
+        import pandas as pd
+        import requests
+        from google.cloud import bigquery, storage
+        from google.cloud.bigquery import LoadJobConfig, SchemaField
+        from google.oauth2 import service_account
+
+        GCP_PROJECT_ID = os.environ["GCP_PROJECT_ID"]
+        SA_KEY_PATH = os.environ["GCP_SERVICE_ACCOUNT_KEY_PATH"]
+        BQ_DATASET_RAW = os.environ["BQ_DATASET_RAW"]
+        GCS_BUCKET_RAW = os.environ["GCS_BUCKET_RAW"]
+        ONEMAP_API_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
+        ONEMAP_RATE_LIMIT_DELAY = 0.3
+
+        _GCP_SCOPES = [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/devstorage.read_write",
+        ]
+
+        BQ_TABLE = "hdb_locations"
+        BQ_SCHEMA = [
+            SchemaField("street_name", "STRING"),
+            SchemaField("latitude", "FLOAT64"),
+            SchemaField("longitude", "FLOAT64"),
+            SchemaField("geocode_status", "STRING"),
+            SchemaField("geocoded_at", "TIMESTAMP"),
+        ]
+
+        def get_credentials():
+            return service_account.Credentials.from_service_account_file(
+                SA_KEY_PATH, scopes=_GCP_SCOPES
+            )
+
+        def geocode_street(street_name, session):
+            params = {"searchVal": street_name, "returnGeom": "Y", "getAddrDetails": "Y", "pageNum": 1}
+            for attempt in range(3):
+                try:
+                    resp = session.get(ONEMAP_API_URL, params=params, timeout=10)
+                    if resp.status_code == 429:
+                        time.sleep(5)
+                        continue
+                    resp.raise_for_status()
+                    break
+                except requests.exceptions.ConnectionError:
+                    if attempt == 2:
+                        return {"street_name": street_name, "latitude": None, "longitude": None, "geocode_status": "ERROR"}
+                    time.sleep(5)
+            results = resp.json().get("results", [])
+            if results:
+                first = results[0]
+                return {"street_name": street_name, "latitude": float(first["LATITUDE"]), "longitude": float(first["LONGITUDE"]), "geocode_status": "OK"}
+            return {"street_name": street_name, "latitude": None, "longitude": None, "geocode_status": "NOT_FOUND"}
+
+        date_str = datetime.now().strftime("%Y%m%d")
+        gcs_uri = f"gs://{GCS_BUCKET_RAW}/hdb_resale/hdb_resale_{date_str}.csv"
+        creds = get_credentials()
+        gcs_client = storage.Client(project=GCP_PROJECT_ID, credentials=creds)
+        without_scheme = gcs_uri[len("gs://"):]
+        bucket_name, blob_path = without_scheme.split("/", 1)
+        content = gcs_client.bucket(bucket_name).blob(blob_path).download_as_bytes()
+        hdb_df = pd.read_csv(io.BytesIO(content))
+        print(f"Loaded {len(hdb_df):,} rows from {gcs_uri}")
+
+        unique_streets = list(dict.fromkeys(hdb_df["street_name"].dropna().tolist()))
+        print(f"Geocoding {len(unique_streets)} unique street names...")
+        results = []
+        with requests.Session() as session:
+            for i, street in enumerate(unique_streets, 1):
+                results.append(geocode_street(street, session))
+                time.sleep(ONEMAP_RATE_LIMIT_DELAY)
+                if i % 50 == 0:
+                    print(f"  Geocoded {i} / {len(unique_streets)} streets...")
+
+        geo_df = pd.DataFrame(results)
+        geo_df["geocoded_at"] = datetime.now(timezone.utc)
+        ok = (geo_df["geocode_status"] == "OK").sum()
+        not_found = (geo_df["geocode_status"] == "NOT_FOUND").sum()
+        print(f"Geocoding complete: {ok} OK, {not_found} NOT_FOUND.")
+
+        enriched_df = hdb_df.merge(geo_df[["street_name", "latitude", "longitude"]], on="street_name", how="left")
+        enriched_path = f"hdb_enriched/hdb_enriched_{date_str}.csv"
+        buf = io.StringIO()
+        enriched_df.to_csv(buf, index=False)
+        csv_bytes = buf.getvalue().encode("utf-8")
+        gcs_client.bucket(GCS_BUCKET_RAW).blob(enriched_path).upload_from_string(csv_bytes, content_type="text/csv")
+        print(f"Uploaded enriched data to gs://{GCS_BUCKET_RAW}/{enriched_path}")
+
+        bq_client = bigquery.Client(project=GCP_PROJECT_ID, credentials=creds)
+        table_ref = f"{GCP_PROJECT_ID}.{BQ_DATASET_RAW}.{BQ_TABLE}"
+        job_config = LoadJobConfig(schema=BQ_SCHEMA, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+        job = bq_client.load_table_from_dataframe(geo_df, table_ref, job_config=job_config)
+        job.result()
+        print(f"Loaded {job.output_rows:,} rows into {table_ref}.")
+    commands:
+      - python location_enricher.py
+
+  - id: dbt_run
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: "Build all dbt staging and mart models"
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: ghcr.io/kestra-io/dbt-bigquery:latest
+    env:
+      GCP_SA_KEY_JSON: "{{ kv('GCP_SA_KEY_JSON') }}"
+    beforeCommands:
+      - printf '%s' "$GCP_SA_KEY_JSON" > /tmp/sa-key.json
+    inputFiles:
+      dbt_project.yml: |
+        name: hdb_resale
+        version: '1.0.0'
+        config-version: 2
+
+        profile: hdb_resale
+
+        model-paths: ["models"]
+        test-paths: ["tests"]
+        macro-paths: ["macros"]
+
+        target-path: "target"
+        clean-targets:
+          - "target"
+          - "dbt_packages"
+
+        models:
+          hdb_resale:
+            staging:
+              +materialized: view
+              +schema: staging
+            marts:
+              +materialized: table
+              +schema: marts
+
+      profiles.yml: |
+        hdb_resale:
+          target: dev
+          outputs:
+            dev:
+              type: bigquery
+              method: service-account
+              project: de-zoomcamp-hdb-resale
+              dataset: dbt_sthyagaraj
+              location: asia-southeast1
+              keyfile: /tmp/sa-key.json
+              threads: 4
+              timeout_seconds: 300
+
+      models/staging/sources.yml: |
+        version: 2
+
+        sources:
+          - name: raw_hdb
+            database: de-zoomcamp-hdb-resale
+            schema: raw_hdb
+            tables:
+              - name: hdb_resale
+                description: "Raw HDB resale flat prices loaded from data.gov.sg"
+              - name: hdb_locations
+                description: "Geocoded street name lookup from OneMap API"
+
+      models/staging/schema.yml: |
+        version: 2
+
+        models:
+          - name: stg_hdb_prices
+            description: "Cleaned and typed HDB resale flat prices from raw layer"
+            columns:
+              - name: month
+                tests:
+                  - not_null
+              - name: town
+                tests:
+                  - not_null
+              - name: flat_type
+                tests:
+                  - not_null
+                  - accepted_values:
+                      arguments:
+                        values: ['1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM', 'EXECUTIVE', 'MULTI-GENERATION', 'MULTI GENERATION']
+              - name: resale_price
+                tests:
+                  - not_null
+              - name: floor_area_sqm
+                tests:
+                  - not_null
+              - name: street_name
+                tests:
+                  - not_null
+
+          - name: stg_locations
+            description: "Geocoded street name lookup from OneMap API"
+            columns:
+              - name: street_name
+                tests:
+                  - not_null
+                  - unique
+              - name: latitude
+                tests:
+                  - not_null
+              - name: longitude
+                tests:
+                  - not_null
+
+      models/staging/stg_hdb_prices.sql: |
+        {% verbatim %}with source as (
+            select * from {{ source('raw_hdb', 'hdb_resale') }}
+        ),
+
+        staged as (
+            select
+                parse_date('%Y-%m', month)                          as month,
+                upper(trim(town))                                   as town,
+                upper(trim(flat_type))                              as flat_type,
+                trim(block)                                         as block,
+                upper(trim(street_name))                            as street_name,
+                trim(storey_range)                                  as storey_range,
+                safe_cast(floor_area_sqm as float64)                as floor_area_sqm,
+                upper(trim(flat_model))                             as flat_model,
+                safe_cast(lease_commence_date as int64)             as lease_commence_date,
+                trim(remaining_lease)                               as remaining_lease,
+                safe_cast(resale_price as float64)                  as resale_price,
+                ingested_at
+            from source
+            where month is not null
+              and resale_price is not null
+        )
+
+        select * from staged{% endverbatim %}
+
+      models/staging/stg_locations.sql: |
+        {% verbatim %}with source as (
+            select * from {{ source('raw_hdb', 'hdb_locations') }}
+        ),
+
+        staged as (
+            select
+                upper(trim(street_name))    as street_name,
+                latitude,
+                longitude,
+                geocode_status,
+                geocoded_at
+            from source
+            where geocode_status = 'OK'
+        )
+
+        select * from staged{% endverbatim %}
+
+      models/marts/schema.yml: |
+        version: 2
+
+        models:
+          - name: mart_hdb_by_month
+            description: "Monthly HDB resale price aggregates by town and flat type"
+            columns:
+              - name: month
+                tests:
+                  - not_null
+              - name: town
+                tests:
+                  - not_null
+              - name: flat_type
+                tests:
+                  - not_null
+              - name: transaction_count
+                tests:
+                  - not_null
+              - name: avg_resale_price
+                tests:
+                  - not_null
+              - name: median_resale_price
+                tests:
+                  - not_null
+
+          - name: mart_affordability_index
+            description: "Affordability metrics by town and flat type over last 24 months"
+            columns:
+              - name: town
+                tests:
+                  - not_null
+              - name: flat_type
+                tests:
+                  - not_null
+              - name: affordability_index
+                tests:
+                  - not_null
+
+          - name: mart_price_trends
+            description: "Quarter-over-quarter HDB resale price trends by town and flat type"
+            columns:
+              - name: quarter
+                tests:
+                  - not_null
+              - name: town
+                tests:
+                  - not_null
+              - name: flat_type
+                tests:
+                  - not_null
+              - name: median_resale_price
+                tests:
+                  - not_null
+
+      models/marts/mart_hdb_by_month.sql: |
+        {% verbatim %}{{
+            config(materialized='table')
+        }}
+
+        with prices as (
+            select * from {{ ref('stg_hdb_prices') }}
+        ),
+
+        locations as (
+            select * from {{ ref('stg_locations') }}
+        ),
+
+        joined as (
+            select
+                p.month,
+                p.town,
+                p.flat_type,
+                p.floor_area_sqm,
+                p.resale_price,
+                p.storey_range,
+                l.latitude,
+                l.longitude
+            from prices p
+            left join locations l on p.street_name = l.street_name
+        ),
+
+        aggregated as (
+            select
+                month,
+                town,
+                flat_type,
+                count(*)                                                        as transaction_count,
+                round(avg(resale_price), 0)                                     as avg_resale_price,
+                round(approx_quantiles(resale_price, 2)[offset(1)], 0)         as median_resale_price,
+                round(avg(resale_price / nullif(floor_area_sqm, 0)), 0)         as avg_price_per_sqm,
+                round(avg(floor_area_sqm), 1)                                   as avg_floor_area_sqm,
+                avg(latitude)                                                   as latitude,
+                avg(longitude)                                                  as longitude
+            from joined
+            group by month, town, flat_type
+        )
+
+        select * from aggregated{% endverbatim %}
+
+      models/marts/mart_affordability_index.sql: |
+        {% verbatim %}{{
+            config(materialized='table')
+        }}
+
+        with prices as (
+            select * from {{ ref('stg_hdb_prices') }}
+        ),
+
+        recent as (
+            select *
+            from prices
+            where month >= date_sub(date_trunc(current_date(), month), interval 24 month)
+        ),
+
+        by_town as (
+            select
+                town,
+                flat_type,
+                count(*)                                                        as transaction_count,
+                round(avg(resale_price), 0)                                     as avg_resale_price,
+                round(approx_quantiles(resale_price, 2)[offset(1)], 0)         as median_resale_price,
+                round(avg(floor_area_sqm), 1)                                   as avg_floor_area_sqm,
+                round(avg(resale_price / nullif(floor_area_sqm, 0)), 0)         as avg_price_per_sqm
+            from recent
+            group by town, flat_type
+        )
+
+        select
+            town,
+            flat_type,
+            transaction_count,
+            avg_resale_price,
+            median_resale_price,
+            avg_floor_area_sqm,
+            avg_price_per_sqm,
+            round(median_resale_price / nullif(avg_floor_area_sqm, 0), 0)       as affordability_index
+        from by_town{% endverbatim %}
+
+      models/marts/mart_price_trends.sql: |
+        {% verbatim %}{{
+            config(materialized='table')
+        }}
+
+        with prices as (
+            select * from {{ ref('stg_hdb_prices') }}
+        ),
+
+        quarterly as (
+            select
+                date_trunc(month, quarter)                                      as quarter,
+                town,
+                flat_type,
+                count(*)                                                        as transaction_count,
+                round(avg(resale_price), 0)                                     as avg_resale_price,
+                round(approx_quantiles(resale_price, 2)[offset(1)], 0)         as median_resale_price
+            from prices
+            group by quarter, town, flat_type
+        ),
+
+        with_lag as (
+            select
+                quarter,
+                town,
+                flat_type,
+                transaction_count,
+                avg_resale_price,
+                median_resale_price,
+                lag(median_resale_price) over (
+                    partition by town, flat_type
+                    order by quarter
+                )                                                               as prev_quarter_median
+            from quarterly
+        )
+
+        select
+            quarter,
+            town,
+            flat_type,
+            transaction_count,
+            avg_resale_price,
+            median_resale_price,
+            prev_quarter_median,
+            round(
+                safe_divide(median_resale_price - prev_quarter_median, prev_quarter_median) * 100,
+                2
+            )                                                                   as qoq_change_pct
+        from with_lag{% endverbatim %}
+    commands:
+      - dbt run --profiles-dir .
+
+  - id: dbt_test
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: "Run all dbt tests"
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: ghcr.io/kestra-io/dbt-bigquery:latest
+    env:
+      GCP_SA_KEY_JSON: "{{ kv('GCP_SA_KEY_JSON') }}"
+    beforeCommands:
+      - printf '%s' "$GCP_SA_KEY_JSON" > /tmp/sa-key.json
+    inputFiles:
+      dbt_project.yml: |
+        name: hdb_resale
+        version: '1.0.0'
+        config-version: 2
+
+        profile: hdb_resale
+
+        model-paths: ["models"]
+        test-paths: ["tests"]
+        macro-paths: ["macros"]
+
+        target-path: "target"
+        clean-targets:
+          - "target"
+          - "dbt_packages"
+
+        models:
+          hdb_resale:
+            staging:
+              +materialized: view
+              +schema: staging
+            marts:
+              +materialized: table
+              +schema: marts
+
+      profiles.yml: |
+        hdb_resale:
+          target: dev
+          outputs:
+            dev:
+              type: bigquery
+              method: service-account
+              project: de-zoomcamp-hdb-resale
+              dataset: dbt_sthyagaraj
+              location: asia-southeast1
+              keyfile: /tmp/sa-key.json
+              threads: 4
+              timeout_seconds: 300
+
+      models/staging/sources.yml: |
+        version: 2
+
+        sources:
+          - name: raw_hdb
+            database: de-zoomcamp-hdb-resale
+            schema: raw_hdb
+            tables:
+              - name: hdb_resale
+              - name: hdb_locations
+
+      models/staging/schema.yml: |
+        version: 2
+
+        models:
+          - name: stg_hdb_prices
+            columns:
+              - name: month
+                tests: [not_null]
+              - name: town
+                tests: [not_null]
+              - name: flat_type
+                tests:
+                  - not_null
+                  - accepted_values:
+                      arguments:
+                        values: ['1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM', 'EXECUTIVE', 'MULTI-GENERATION', 'MULTI GENERATION']
+              - name: resale_price
+                tests: [not_null]
+              - name: floor_area_sqm
+                tests: [not_null]
+              - name: street_name
+                tests: [not_null]
+          - name: stg_locations
+            columns:
+              - name: street_name
+                tests: [not_null, unique]
+              - name: latitude
+                tests: [not_null]
+              - name: longitude
+                tests: [not_null]
+
+      models/staging/stg_hdb_prices.sql: |
+        {% verbatim %}with source as (
+            select * from {{ source('raw_hdb', 'hdb_resale') }}
+        ),
+        staged as (
+            select
+                parse_date('%Y-%m', month) as month, upper(trim(town)) as town,
+                upper(trim(flat_type)) as flat_type, trim(block) as block,
+                upper(trim(street_name)) as street_name, trim(storey_range) as storey_range,
+                safe_cast(floor_area_sqm as float64) as floor_area_sqm,
+                upper(trim(flat_model)) as flat_model,
+                safe_cast(lease_commence_date as int64) as lease_commence_date,
+                trim(remaining_lease) as remaining_lease,
+                safe_cast(resale_price as float64) as resale_price, ingested_at
+            from source where month is not null and resale_price is not null
+        )
+        select * from staged{% endverbatim %}
+
+      models/staging/stg_locations.sql: |
+        {% verbatim %}with source as (
+            select * from {{ source('raw_hdb', 'hdb_locations') }}
+        ),
+        staged as (
+            select upper(trim(street_name)) as street_name, latitude, longitude, geocode_status, geocoded_at
+            from source where geocode_status = 'OK'
+        )
+        select * from staged{% endverbatim %}
+
+      models/marts/schema.yml: |
+        version: 2
+
+        models:
+          - name: mart_hdb_by_month
+            columns:
+              - name: month
+                tests: [not_null]
+              - name: town
+                tests: [not_null]
+              - name: flat_type
+                tests: [not_null]
+              - name: transaction_count
+                tests: [not_null]
+              - name: avg_resale_price
+                tests: [not_null]
+              - name: median_resale_price
+                tests: [not_null]
+          - name: mart_affordability_index
+            columns:
+              - name: town
+                tests: [not_null]
+              - name: flat_type
+                tests: [not_null]
+              - name: affordability_index
+                tests: [not_null]
+          - name: mart_price_trends
+            columns:
+              - name: quarter
+                tests: [not_null]
+              - name: town
+                tests: [not_null]
+              - name: flat_type
+                tests: [not_null]
+              - name: median_resale_price
+                tests: [not_null]
+
+      models/marts/mart_hdb_by_month.sql: |
+        {% verbatim %}{{ config(materialized='table') }}
+        with prices as (select * from {{ ref('stg_hdb_prices') }}),
+        locations as (select * from {{ ref('stg_locations') }}),
+        joined as (
+            select p.month, p.town, p.flat_type, p.floor_area_sqm, p.resale_price,
+                   p.storey_range, l.latitude, l.longitude
+            from prices p left join locations l on p.street_name = l.street_name
+        ),
+        aggregated as (
+            select month, town, flat_type,
+                count(*) as transaction_count,
+                round(avg(resale_price), 0) as avg_resale_price,
+                round(approx_quantiles(resale_price, 2)[offset(1)], 0) as median_resale_price,
+                round(avg(resale_price / nullif(floor_area_sqm, 0)), 0) as avg_price_per_sqm,
+                round(avg(floor_area_sqm), 1) as avg_floor_area_sqm,
+                avg(latitude) as latitude, avg(longitude) as longitude
+            from joined group by month, town, flat_type
+        )
+        select * from aggregated{% endverbatim %}
+
+      models/marts/mart_affordability_index.sql: |
+        {% verbatim %}{{ config(materialized='table') }}
+        with prices as (select * from {{ ref('stg_hdb_prices') }}),
+        recent as (
+            select * from prices
+            where month >= date_sub(date_trunc(current_date(), month), interval 24 month)
+        ),
+        by_town as (
+            select town, flat_type, count(*) as transaction_count,
+                round(avg(resale_price), 0) as avg_resale_price,
+                round(approx_quantiles(resale_price, 2)[offset(1)], 0) as median_resale_price,
+                round(avg(floor_area_sqm), 1) as avg_floor_area_sqm,
+                round(avg(resale_price / nullif(floor_area_sqm, 0)), 0) as avg_price_per_sqm
+            from recent group by town, flat_type
+        )
+        select *, round(median_resale_price / nullif(avg_floor_area_sqm, 0), 0) as affordability_index
+        from by_town{% endverbatim %}
+
+      models/marts/mart_price_trends.sql: |
+        {% verbatim %}{{ config(materialized='table') }}
+        with prices as (select * from {{ ref('stg_hdb_prices') }}),
+        quarterly as (
+            select date_trunc(month, quarter) as quarter, town, flat_type,
+                count(*) as transaction_count,
+                round(avg(resale_price), 0) as avg_resale_price,
+                round(approx_quantiles(resale_price, 2)[offset(1)], 0) as median_resale_price
+            from prices group by quarter, town, flat_type
+        ),
+        with_lag as (
+            select *, lag(median_resale_price) over (partition by town, flat_type order by quarter) as prev_quarter_median
+            from quarterly
+        )
+        select *, round(safe_divide(median_resale_price - prev_quarter_median, prev_quarter_median) * 100, 2) as qoq_change_pct
+        from with_lag{% endverbatim %}
+    commands:
+      - dbt test --profiles-dir .
+
+errors:
+  - id: notify_failure
+    type: io.kestra.plugin.core.log.Log
+    message: "HDB backfill FAILED. Check logs above for details."
