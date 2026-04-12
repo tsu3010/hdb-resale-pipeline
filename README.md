@@ -221,9 +221,9 @@ dbt test --profiles-dir .
 
 Connects to BigQuery dataset `dbt_sthyagaraj_marts`.
 
-<!-- TODO: Insert dashboard screenshot 1 (Price Overview page) here -->
+![Resale Trends](docs/HDB_Project_ResaleTrends_Screenshot.png)
 
-<!-- TODO: Insert dashboard screenshot 2 (Map page) here -->
+![Maps](docs/HDB_Project_Maps_Screenshot.png)
 
 ---
 
