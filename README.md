@@ -4,11 +4,24 @@
 ![Terraform](https://img.shields.io/badge/IaC-Terraform-green)
 ![GCS](https://img.shields.io/badge/Data_Lake-Google_Cloud_Storage-blue)
 ![BigQuery](https://img.shields.io/badge/Data_Warehouse-BigQuery-blue)
-![dbt](https://img.shields.io/badge/Transform-dbt-orange)
+![dbt](https://img.shields.io/badge/Transform-dbt--fusion-orange)
 ![Kestra](https://img.shields.io/badge/Orchestration-Kestra-purple)
 ![Python](https://img.shields.io/badge/Language-Python_3.13-yellow)
 
 **Data Engineering Zoomcamp 2026 Capstone Project**
+
+---
+
+## Status
+
+- [x] GCP infrastructure provisioned via Terraform
+- [x] HDB resale data ingested from data.gov.sg API → GCS + BigQuery (`raw_hdb.hdb_resale`, 228,542 rows)
+- [x] Street geocoding via OneMap API → BigQuery (`raw_hdb.hdb_locations`, 577 streets)
+- [x] dbt staging models: `stg_hdb_prices`, `stg_locations`
+- [x] dbt mart models: `mart_hdb_by_month`, `mart_affordability_index`, `mart_price_trends`
+- [x] 24 dbt tests passing across staging and mart layers
+- [x] Looker Studio dashboard (in progress)
+- [ ] Kestra orchestration flows
 
 ---
 
@@ -26,7 +39,7 @@ This project builds an end-to-end data pipeline to answer:
 
 ## Overview
 
-This project ingests historical HDB resale flat price data from [data.gov.sg](https://data.gov.sg/datasets/189) and enriches it with geographic coordinates via the OneMap API. The pipeline loads raw data into Google Cloud Storage, transforms it through dbt models in BigQuery, and surfaces insights via a Looker Studio dashboard.
+This project ingests historical HDB resale flat price data from the [data.gov.sg API](https://data.gov.sg/datasets/189) and enriches it with geographic coordinates via the OneMap API. The pipeline loads raw data into Google Cloud Storage, transforms it through dbt models in BigQuery, and surfaces insights via a Looker Studio dashboard.
 
 Orchestration is handled by Kestra, with infrastructure provisioned via Terraform on GCP.
 
@@ -57,7 +70,7 @@ Orchestration is handled by Kestra, with infrastructure provisioned via Terrafor
 | **Data Lake** | Google Cloud Storage (GCS) |
 | **Data Warehouse** | BigQuery |
 | **Ingestion** | Python 3.13+ |
-| **Transformation** | dbt + BigQuery SQL |
+| **Transformation** | dbt-fusion 2.0.0 (preview) + BigQuery SQL |
 | **Orchestration** | Kestra |
 | **Visualization** | Looker Studio |
 | **Package Manager** | uv |
@@ -67,7 +80,7 @@ Orchestration is handled by Kestra, with infrastructure provisioned via Terrafor
 ## Architecture
 
 ```text
-data.gov.sg (HDB CSV)
+data.gov.sg API (HDB resale data)
     ↓
 Python Ingestion (hdb_loader.py)
     ↓
@@ -75,11 +88,11 @@ GCS Raw Layer (gs://de-zoomcamp-hdb-resale-hdb-raw/)
     ↓
 OneMap API Geocoding (location_enricher.py)
     ↓
-BigQuery raw_hdb (raw table)
+BigQuery raw_hdb (hdb_resale + hdb_locations)
     ↓
-dbt Transformation
+dbt Transformation (staging → marts)
     ↓
-BigQuery dbt_sthyagaraj
+BigQuery dbt_sthyagaraj_marts
     ↓
 Looker Studio Dashboard
 ```
@@ -95,50 +108,45 @@ hdb-resale-pipeline/
 ├── README.md
 ├── pyproject.toml            # uv project config
 ├── uv.lock                   # pinned dependencies
-├── requirements.txt          # legacy reference
 ├── .env.example              # environment variable template
 ├── .gitignore
 │
 ├── terraform/                # GCP infrastructure
 │   ├── main.tf
 │   ├── variables.tf
-│   ├── outputs.tf
-│   └── terraform.tfvars
+│   └── outputs.tf
 │
 ├── src/ingestion/            # Python ingestion scripts
-│   ├── hdb_loader.py         # Load HDB CSV to GCS + BigQuery
-│   ├── location_enricher.py  # Geocode via OneMap API
-│   └── config.py             # Shared configuration
+│   ├── hdb_loader.py         # Fetch from data.gov.sg API → GCS + BigQuery
+│   ├── location_enricher.py  # Geocode street names via OneMap API
+│   ├── config.py             # Shared configuration and env vars
+│   └── test_api_key.py       # Smoke test for data.gov.sg API key
 │
 ├── dbt/                      # Data transformation
 │   ├── dbt_project.yml
 │   ├── profiles.yml
-│   ├── models/
-│   │   ├── staging/
-│   │   │   ├── stg_hdb_prices.sql
-│   │   │   └── stg_locations.sql
-│   │   └── marts/
-│   │       ├── mart_hdb_by_month.sql
-│   │       ├── mart_affordability_index.sql
-│   │       └── mart_price_trends.sql
-│   └── tests/
+│   └── models/
+│       ├── staging/
+│       │   ├── sources.yml
+│       │   ├── schema.yml
+│       │   ├── stg_hdb_prices.sql
+│       │   └── stg_locations.sql
+│       └── marts/
+│           ├── schema.yml
+│           ├── mart_hdb_by_month.sql
+│           ├── mart_affordability_index.sql
+│           └── mart_price_trends.sql
 │
-├── kestra/flows/             # Orchestration
-│   ├── backfill_flow.yml
-│   └── incremental_flow.yml
-│
-└── docs/
-    ├── architecture.md
-    └── video_script.md
+└── kestra/flows/             # Orchestration (coming soon)
 ```
 
 ---
 
 ## Data Source Overview
 
-[data.gov.sg](https://data.gov.sg/datasets/189) provides historical HDB resale flat transaction records updated monthly. The dataset includes town, flat type, storey range, floor area, resale price, and lease commencement date going back to 1990.
+[data.gov.sg](https://data.gov.sg/datasets/189) provides historical HDB resale flat transaction records updated monthly via a REST API. The dataset includes town, flat type, storey range, floor area, resale price, and lease commencement date going back to 1990 (228,542 records).
 
-Geographic enrichment is done via the [OneMap API](https://www.onemap.sg/docs/) — Singapore's official geocoding service — which maps street names to latitude/longitude coordinates.
+Geographic enrichment is done via the [OneMap API](https://www.onemap.gov.sg/apidocs/) — Singapore's official geocoding service — which maps 577 unique street names to latitude/longitude coordinates.
 
 ---
 
@@ -146,45 +154,38 @@ Geographic enrichment is done via the [OneMap API](https://www.onemap.sg/docs/) 
 
 ### 1. Data Extraction
 
-- Download HDB resale CSV from data.gov.sg
-- `hdb_loader.py` uploads raw CSV to GCS and loads it into BigQuery `raw_hdb`
+- `hdb_loader.py` fetches the full HDB resale dataset via the data.gov.sg API
+- Raw CSV uploaded to GCS (`hdb_resale/`) and loaded into BigQuery (`raw_hdb.hdb_resale`)
+- All columns stored as strings in the raw layer — no type casting at this stage
 
 ### 2. Location Enrichment
 
-- `location_enricher.py` calls the OneMap API for each unique street name
-- Enriched dataset (with lat/long) written back to GCS and joined into staging
+- `location_enricher.py` calls the OneMap API for each unique street name (577 streets)
+- Geocoded lookup table loaded into BigQuery (`raw_hdb.hdb_locations`)
+- Enriched CSV (with lat/long) written back to GCS (`hdb_enriched/`)
 
 ### 3. Data Transformation (dbt)
 
 | Layer | Model | Description |
 | ----- | ----- | ----------- |
-| Staging | `stg_hdb_prices` | Cleaned prices with standardized columns |
-| Staging | `stg_locations` | Lat/long from OneMap joined to transactions |
-| Marts | `mart_hdb_by_month` | Monthly median price, count, price/sqft by town |
-| Marts | `mart_affordability_index` | Affordability metrics by town |
-| Marts | `mart_price_trends` | Quarter-over-quarter price evolution |
+| Staging | `stg_hdb_prices` | Type casting (STRING → DATE/FLOAT/INT), whitespace trimming |
+| Staging | `stg_locations` | Filtered to `geocode_status = OK` |
+| Marts | `mart_hdb_by_month` | Monthly median price, count, price/sqm by town & flat type |
+| Marts | `mart_affordability_index` | Affordability metrics by town (last 24 months) |
+| Marts | `mart_price_trends` | Quarter-over-quarter price evolution by town & flat type |
 
 ### 4. Orchestration (Kestra)
 
-**Backfill flow** (one-time):
-
-```
-extract_csv → upload_to_gcs → geocode → load_to_bigquery → dbt_run → dbt_test
-```
-
-**Incremental flow** (weekly):
-
-```
-check_for_updates → enrich → append_to_gcs → load_delta → dbt_run_incremental → alert_on_failure
-```
+Coming soon — flows will manage the backfill and weekly incremental pipeline end-to-end.
 
 ### 5. Visualization
 
-Looker Studio dashboard connects to `dbt_sthyagaraj` in BigQuery and presents:
+Looker Studio dashboard connects to `dbt_sthyagaraj_marts` in BigQuery and presents:
 
-- **Affordability Trends** — median price by town over time
-- **Market Segments** — room-type distribution and price ranges
+- **Price Trends** — median resale price over time by town and flat type
+- **Affordability Index** — price per sqm comparison across towns
 - **Price Heatmap** — geographic scatter plot coloured by resale price
+- **QoQ Trends** — quarter-over-quarter price change
 
 Filters: town, flat type, date range
 
@@ -192,24 +193,22 @@ Filters: town, flat type, date range
 
 ## Data Quality & Testing
 
-- **dbt schema tests:** `not_null`, `unique`, `accepted_values` on key columns
-- **dbt custom tests:** price range sanity checks, floor area bounds
-- **Terraform validation:** `terraform validate` and `terraform plan` before every apply
-- **dbt docs:** full lineage and data dictionary at `dbt/target/index.html`
+- **dbt schema tests:** `not_null` on all key columns, `unique` on `street_name`, `accepted_values` on `flat_type`
+- **24 tests passing** across staging and mart layers
+- **Granularity validated:** one row per `month + town + flat_type` in `mart_hdb_by_month`
 
 ```bash
 cd dbt
-dbt test
-dbt docs generate
+dbt test --profiles-dir .
 ```
 
 ---
 
 ## Dashboard
 
-Looker Studio dashboard — connect to BigQuery dataset `dbt_sthyagaraj`.
+[View Looker Studio Dashboard](https://lookerstudio.google.com/reporting/91a37d80-d099-4b13-b210-352725f59a3a)
 
-> Dashboard link to be added after deployment.
+Connects to BigQuery dataset `dbt_sthyagaraj_marts`.
 
 ---
 
@@ -222,6 +221,9 @@ Looker Studio dashboard — connect to BigQuery dataset `dbt_sthyagaraj`.
 - Python 3.13+
 - `uv` — [install guide](https://docs.astral.sh/uv/getting-started/installation/)
 - Terraform >= 1.0
+- dbt-fusion — [install guide](https://github.com/dbt-labs/dbt-fusion)
+- data.gov.sg API key — [sign up](https://data.gov.sg/developers)
+- OneMap account — [register](https://www.onemap.gov.sg/apidocs/)
 - Git
 
 ### 1. Clone & Configure Environment
@@ -230,19 +232,14 @@ Looker Studio dashboard — connect to BigQuery dataset `dbt_sthyagaraj`.
 git clone <repo-url>
 cd hdb-resale-pipeline
 cp .env.example .env
-# Edit .env with your GCP project ID and paths
+# Edit .env — fill in GCP, data.gov.sg, and OneMap credentials
 ```
 
 ### 2. Install Dependencies
 
-`uv init` has already been run — a `pyproject.toml` is included in the repo:
-
 ```bash
-uv add google-cloud-bigquery google-cloud-storage pandas requests python-dotenv pyarrow
 uv sync
 ```
-
-> On subsequent clones, `uv sync` alone is sufficient — `uv.lock` pins all versions.
 
 ### 3. Create GCP Project & Enable APIs
 
@@ -253,88 +250,73 @@ gcloud config set project $GCP_PROJECT_ID
 
 gcloud services enable bigquery.googleapis.com
 gcloud services enable storage-api.googleapis.com
-gcloud services enable cloudscheduler.googleapis.com
 gcloud services enable logging.googleapis.com
 ```
 
 ### 4. Deploy Infrastructure (Terraform)
 
-Terraform uses **Application Default Credentials (ADC)** — no credentials file needed in the config. Authenticate once with:
-
 ```bash
 gcloud auth application-default login
-```
 
-Then deploy:
-
-```bash
 cd terraform
-# Update terraform.tfvars with your GCP project ID
 terraform init
 terraform plan
 terraform apply
 
-# Retrieve service account details
-terraform output service_account_email
-
-# Save the private key locally
+# Save the service account key
 terraform output -raw service_account_key_private | base64 --decode > ../credentials/hdb-pipeline-sa.json
 cd ..
 ```
 
-> The service account (`hdb-pipeline-sa`) is created in GCP. Store `credentials/hdb-pipeline-sa.json` securely and never commit it.
+> Store `credentials/hdb-pipeline-sa.json` securely — never commit it.
 
-### 5. Download HDB Dataset
-
-Download from [data.gov.sg - HDB Resale Flat Prices](https://data.gov.sg/datasets/189) and place at `data/raw/hdb_resale.csv`.
-
-### 6. Run Data Ingestion
+### 5. Run Data Ingestion
 
 ```bash
-uv run python src/ingestion/hdb_loader.py --file data/raw/hdb_resale.csv --backfill
-uv run python src/ingestion/location_enricher.py --input gs://de-zoomcamp-hdb-resale-hdb-raw/hdb_resale.csv --output gs://de-zoomcamp-hdb-resale-hdb-raw/hdb_enriched.csv
+# Fetch HDB resale data from data.gov.sg API → GCS + BigQuery
+uv run python src/ingestion/hdb_loader.py --backfill
+
+# Geocode street names via OneMap API → GCS + BigQuery
+uv run python src/ingestion/location_enricher.py \
+    --input gs://<GCS_BUCKET_RAW>/hdb_resale/hdb_resale_YYYYMMDD.csv
 ```
 
-### 7. Run dbt Transformations
+### 6. Run dbt Transformations
+
+> This project uses **dbt-fusion** (Rust-based dbt engine). Ensure `dbt` is available on your PATH.
 
 ```bash
 cd dbt
-dbt debug       # verify BigQuery connection
-dbt deps
-dbt run
-dbt test
-dbt docs generate
+dbt debug --profiles-dir .       # verify BigQuery connection
+dbt run --profiles-dir .         # build all models
+dbt test --profiles-dir .        # run 24 tests
 cd ..
 ```
 
-### 8. Setup Kestra Orchestration
+### 7. Setup Kestra Orchestration
 
-```bash
-docker-compose up -d  # start Kestra locally
-# Import flows via UI at http://localhost:8080
-# or: kestra flow create < kestra/flows/backfill_flow.yml
-```
+Coming soon.
 
-### 9. Connect Looker Studio Dashboard
+### 8. View Dashboard
 
-Open [Looker Studio](https://lookerstudio.google.com/) and connect to BigQuery dataset `dbt_sthyagaraj`.
+Open the [Looker Studio Dashboard](https://lookerstudio.google.com/reporting/91a37d80-d099-4b13-b210-352725f59a3a) — or connect your own Looker Studio report to BigQuery dataset `dbt_sthyagaraj_marts`.
 
 ---
 
 ## Known Limitations & Future Work
 
+- **Kestra orchestration**: flows not yet implemented
 - **Proximity enrichment**: MRT/school proximity data deferred to Phase 2
 - **Real-time updates**: Weekly batch only — no streaming
 - **Forecasting**: Price prediction/ML models not in MVP scope
-- **Monitoring**: Enhanced alerting and SLAs planned
 
 ---
 
 ## Resources
 
 - [data.gov.sg HDB Resale Data](https://data.gov.sg/datasets/189)
-- [OneMap API Documentation](https://www.onemap.sg/docs/)
-- [dbt Documentation](https://docs.getdbt.com/)
+- [OneMap API Documentation](https://www.onemap.gov.sg/apidocs/)
+- [dbt-fusion](https://github.com/dbt-labs/dbt-fusion)
 - [Kestra Documentation](https://kestra.io/)
 - [BigQuery Best Practices](https://cloud.google.com/bigquery/docs/best-practices)
 - [uv Documentation](https://docs.astral.sh/uv/)
@@ -344,18 +326,3 @@ Open [Looker Studio](https://lookerstudio.google.com/) and connect to BigQuery d
 ## Author
 
 Sudharsan
-
----
-
-**Status**: MVP Phase (April 2026)
-
-## Completed
-
-- [x] GCP infrastructure provisioned via Terraform (GCS bucket, BigQuery datasets, service account)
-- [x] HDB resale data ingested from data.gov.sg → GCS + BigQuery (`raw_hdb.hdb_resale`, 228,542 rows)
-- [x] Street geocoding via OneMap API → BigQuery (`raw_hdb.hdb_locations`, 577 streets)
-- [x] dbt staging models: `stg_hdb_prices`, `stg_locations`
-- [x] dbt mart models: `mart_hdb_by_month`, `mart_affordability_index`, `mart_price_trends`
-- [x] 24 dbt tests passing across staging and mart layers
-- [ ] Kestra orchestration flows
-- [ ] Looker Studio dashboard
