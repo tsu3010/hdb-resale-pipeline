@@ -1,0 +1,52 @@
+{{
+    config(materialized='table')
+}}
+
+with prices as (
+    select * from {{ ref('stg_hdb_prices') }}
+),
+
+-- Latest 24 months of data
+recent as (
+    select *
+    from prices
+    where month >= date_sub(date_trunc(current_date(), month), interval 24 month)
+),
+
+by_town as (
+    select
+        town,
+        flat_type,
+        count(*)                                                        as transaction_count,
+        round(avg(resale_price), 0)                                     as avg_resale_price,
+        round(percentile_cont(resale_price, 0.5) over (
+            partition by town, flat_type), 0)                           as median_resale_price,
+        round(avg(floor_area_sqm), 1)                                   as avg_floor_area_sqm,
+        round(avg(resale_price / nullif(floor_area_sqm, 0)), 0)         as avg_price_per_sqm
+    from recent
+    group by town, flat_type, resale_price
+),
+
+deduped as (
+    select distinct
+        town,
+        flat_type,
+        transaction_count,
+        avg_resale_price,
+        median_resale_price,
+        avg_floor_area_sqm,
+        avg_price_per_sqm
+    from by_town
+)
+
+select
+    town,
+    flat_type,
+    transaction_count,
+    avg_resale_price,
+    median_resale_price,
+    avg_floor_area_sqm,
+    avg_price_per_sqm,
+    -- Affordability index: lower = more affordable relative to floor area
+    round(median_resale_price / nullif(avg_floor_area_sqm, 0), 0)       as affordability_index
+from deduped
