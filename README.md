@@ -81,6 +81,8 @@ Orchestration is handled by Kestra, with infrastructure provisioned via Terrafor
 
 <!-- TODO: Insert architecture diagram image here -->
 
+![Project Architecture](docs/Project_Architecture_Diagram.png)
+
 ```text
 data.gov.sg API (HDB resale data)
     ↓
