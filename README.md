@@ -347,4 +347,15 @@ Sudharsan
 
 ---
 
-**Status**: MVP Phase (March 2026)
+**Status**: MVP Phase (April 2026)
+
+## Completed
+
+- [x] GCP infrastructure provisioned via Terraform (GCS bucket, BigQuery datasets, service account)
+- [x] HDB resale data ingested from data.gov.sg → GCS + BigQuery (`raw_hdb.hdb_resale`, 228,542 rows)
+- [x] Street geocoding via OneMap API → BigQuery (`raw_hdb.hdb_locations`, 577 streets)
+- [x] dbt staging models: `stg_hdb_prices`, `stg_locations`
+- [x] dbt mart models: `mart_hdb_by_month`, `mart_affordability_index`, `mart_price_trends`
+- [x] 24 dbt tests passing across staging and mart layers
+- [ ] Kestra orchestration flows
+- [ ] Looker Studio dashboard

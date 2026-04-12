@@ -24,6 +24,7 @@ target/
 dbt_packages/
 dbt/target/
 dbt/dbt_packages/
+dbt/.user.yml
 logs/
 
 # Python

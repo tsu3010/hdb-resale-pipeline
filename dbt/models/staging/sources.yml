@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: raw_hdb
+    database: de-zoomcamp-hdb-resale
+    schema: raw_hdb
+    tables:
+      - name: hdb_resale
+        description: "Raw HDB resale flat prices loaded from data.gov.sg"
+      - name: hdb_locations
+        description: "Geocoded street name lookup from OneMap API"

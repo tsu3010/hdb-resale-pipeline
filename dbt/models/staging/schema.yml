@@ -1,0 +1,50 @@
+version: 2
+
+models:
+  - name: stg_hdb_prices
+    description: "Cleaned and typed HDB resale flat prices from raw layer"
+    columns:
+      - name: month
+        description: "Transaction month (first day of month)"
+        tests:
+          - not_null
+      - name: town
+        description: "HDB town name"
+        tests:
+          - not_null
+      - name: flat_type
+        description: "Flat type e.g. 3 ROOM, 4 ROOM"
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM', 'EXECUTIVE', 'MULTI-GENERATION', 'MULTI GENERATION']
+      - name: resale_price
+        description: "Resale transaction price in SGD"
+        tests:
+          - not_null
+      - name: floor_area_sqm
+        description: "Floor area in square metres"
+        tests:
+          - not_null
+      - name: street_name
+        description: "Street name of the flat"
+        tests:
+          - not_null
+
+  - name: stg_locations
+    description: "Geocoded street name lookup from OneMap API"
+    columns:
+      - name: street_name
+        description: "Street name (uppercased)"
+        tests:
+          - not_null
+          - unique
+      - name: latitude
+        description: "Latitude coordinate"
+        tests:
+          - not_null
+      - name: longitude
+        description: "Longitude coordinate"
+        tests:
+          - not_null

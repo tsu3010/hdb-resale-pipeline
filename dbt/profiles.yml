@@ -1,0 +1,12 @@
+hdb_resale:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+      project: de-zoomcamp-hdb-resale
+      dataset: dbt_sthyagaraj
+      location: asia-southeast1
+      keyfile: "{{ env_var('GCP_SERVICE_ACCOUNT_KEY_PATH', '../credentials/hdb-pipeline-sa.json') }}"
+      threads: 4
+      timeout_seconds: 300

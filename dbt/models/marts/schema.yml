@@ -1,0 +1,53 @@
+version: 2
+
+models:
+  - name: mart_hdb_by_month
+    description: "Monthly HDB resale price aggregates by town and flat type"
+    columns:
+      - name: month
+        tests:
+          - not_null
+      - name: town
+        tests:
+          - not_null
+      - name: flat_type
+        tests:
+          - not_null
+      - name: transaction_count
+        tests:
+          - not_null
+      - name: avg_resale_price
+        tests:
+          - not_null
+      - name: median_resale_price
+        tests:
+          - not_null
+
+  - name: mart_affordability_index
+    description: "Affordability metrics by town and flat type over last 24 months"
+    columns:
+      - name: town
+        tests:
+          - not_null
+      - name: flat_type
+        tests:
+          - not_null
+      - name: affordability_index
+        tests:
+          - not_null
+
+  - name: mart_price_trends
+    description: "Quarter-over-quarter HDB resale price trends by town and flat type"
+    columns:
+      - name: quarter
+        tests:
+          - not_null
+      - name: town
+        tests:
+          - not_null
+      - name: flat_type
+        tests:
+          - not_null
+      - name: median_resale_price
+        tests:
+          - not_null
