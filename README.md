@@ -39,7 +39,7 @@ This project builds an end-to-end data pipeline to answer:
 
 ## Overview
 
-This project ingests historical HDB resale flat price data from the [data.gov.sg API](https://data.gov.sg/datasets/189) and enriches it with geographic coordinates via the OneMap API. The pipeline loads raw data into Google Cloud Storage, transforms it through dbt models in BigQuery, and surfaces insights via a Looker Studio dashboard.
+This project ingests historical HDB resale flat price data from the [data.gov.sg API](https://data.gov.sg/collections/189/view) and enriches it with geographic coordinates via the OneMap API. The pipeline loads raw data into Google Cloud Storage, transforms it through dbt models in BigQuery, and surfaces insights via a Looker Studio dashboard.
 
 Orchestration is handled by Kestra, with infrastructure provisioned via Terraform on GCP.
 
@@ -147,7 +147,7 @@ hdb-resale-pipeline/
 
 ## Data Source Overview
 
-[data.gov.sg](https://data.gov.sg/datasets/189) provides historical HDB resale flat transaction records updated monthly via a REST API. The dataset includes town, flat type, storey range, floor area, resale price, and lease commencement date going back to 1990 (228,542 records).
+[data.gov.sg](https://data.gov.sg/collections/189/view) provides historical HDB resale flat transaction records updated monthly via a REST API. The dataset includes town, flat type, storey range, floor area, resale price, and lease commencement date going back to 1990 (228,542 records).
 
 Geographic enrichment is done via the [OneMap API](https://www.onemap.gov.sg/apidocs/) — Singapore's official geocoding service — which maps 577 unique street names to latitude/longitude coordinates.
 
@@ -368,7 +368,7 @@ Open the [Looker Studio Dashboard](https://lookerstudio.google.com/reporting/91a
 
 ## Resources
 
-- [data.gov.sg HDB Resale Data](https://data.gov.sg/datasets/189)
+- [data.gov.sg HDB Resale Data](https://data.gov.sg/collections/189/view)
 - [OneMap API Documentation](https://www.onemap.gov.sg/apidocs/)
 - [dbt-fusion](https://github.com/dbt-labs/dbt-fusion)
 - [Kestra Documentation](https://kestra.io/)
