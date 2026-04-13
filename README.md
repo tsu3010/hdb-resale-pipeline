@@ -21,7 +21,7 @@
 - [x] dbt mart models: `mart_hdb_by_month`, `mart_affordability_index`, `mart_price_trends`
 - [x] 24 dbt tests passing across staging and mart layers
 - [x] Looker Studio dashboard
-- [x] Kestra orchestration flows (backfill + weekly incremental)
+- [x] Kestra orchestration flow
 
 ---
 
@@ -79,8 +79,6 @@ Orchestration is handled by Kestra, with infrastructure provisioned via Terrafor
 
 ## Architecture
 
-<!-- TODO: Insert architecture diagram image here -->
-
 ![Project Architecture](docs/Project_Architecture_Diagram.png)
 
 ```text
@@ -101,7 +99,7 @@ BigQuery dbt_sthyagaraj_marts
 Looker Studio Dashboard
 ```
 
-Orchestration via Kestra manages both the backfill and weekly incremental flows end-to-end.
+Orchestration via Kestra manages the pipeline end-to-end.
 
 ---
 
@@ -141,9 +139,8 @@ hdb-resale-pipeline/
 │           ├── mart_affordability_index.sql
 │           └── mart_price_trends.sql
 │
-└── kestra/flows/             # Orchestration flows
-    ├── backfill_flow.yml     # One-time full backfill
-    └── incremental_flow.yml  # Weekly incremental load
+└── kestra/flows/                  # Orchestration flows
+    └── hdb_pipeline_flow.yml      # Full pipeline load
 ```
 
 ---
@@ -182,14 +179,15 @@ Geographic enrichment is done via the [OneMap API](https://www.onemap.gov.sg/api
 
 ### 4. Orchestration (Kestra)
 
-Two flows manage the pipeline end-to-end via Kestra, running in Docker locally:
+A single flow manages the pipeline end-to-end via Kestra, running in Docker locally:
 
 | Flow | File | Purpose |
 | ---- | ---- | ------- |
-| `hdb_backfill` | `kestra/flows/backfill_flow.yml` | One-time full load with `WRITE_TRUNCATE` |
-| `hdb_incremental` | `kestra/flows/incremental_flow.yml` | Weekly `WRITE_APPEND`, geocodes only new streets |
+| `hdb_pipeline` | `kestra/flows/hdb_pipeline_flow.yml` | Full load: fetch → geocode → dbt run → dbt test |
 
-Both flows are **self-contained** — Python scripts and dbt models are embedded inline via `inputFiles`. No namespace file uploads or Docker volume mounts required. All credentials are stored in the Kestra KV store.
+The flow is **self-contained** — Python scripts and dbt models are embedded inline via `inputFiles`. No namespace file uploads or Docker volume mounts required. All credentials are stored in the Kestra KV store.
+
+![Kestra Flow](docs/Kestra_Flow.png)
 
 ### 5. Visualization
 
@@ -346,18 +344,13 @@ Kestra UI will be available at [http://localhost:8080](http://localhost:8080).
 
 All credentials are stored in the Kestra KV store (not as files or env vars). In the Kestra UI, navigate to **Namespaces** → `hdb_resale` → **KV Store** and add entries for GCP project details, GCS bucket, BigQuery dataset, API keys, and the full GCP service account JSON. See `.env.example` for the full list of required values.
 
-**Load and run the backfill flow:**
+**Load and run the pipeline flow:**
 
 1. Go to **Flows** → **Create**
-2. Paste the contents of `kestra/flows/backfill_flow.yml`
+2. Paste the contents of `kestra/flows/hdb_pipeline_flow.yml`
 3. Save, then click **Execute**
 
 The flow runs 4 tasks in sequence: `load_hdb_data` → `geocode_locations` → `dbt_run` → `dbt_test`.
-
-**Load the incremental flow (optional):**
-
-1. Repeat the above using `kestra/flows/incremental_flow.yml`
-2. The weekly schedule trigger is disabled by default — enable once backfill is verified complete
 
 ### 8. View Dashboard
 
@@ -368,7 +361,7 @@ Open the [Looker Studio Dashboard](https://lookerstudio.google.com/reporting/91a
 ## Known Limitations & Future Work
 
 - **Proximity enrichment**: MRT/school proximity data deferred to Phase 2
-- **Real-time updates**: Weekly batch only — no streaming
+- **Incremental load**: Current pipeline does a full reload on every run (`WRITE_TRUNCATE`). A future improvement would add a scheduled incremental flow that fetches only new monthly records from data.gov.sg, deduplicates against existing BigQuery data, and geocodes only new streets — reducing runtime and API cost
 - **Forecasting**: Price prediction/ML models not in MVP scope
 
 ---

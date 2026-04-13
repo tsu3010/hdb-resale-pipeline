@@ -1,8 +1,8 @@
-id: hdb_backfill
+id: hdb_pipeline
 namespace: hdb_resale
 
 description: |
-  Full backfill of HDB resale pipeline:
+  HDB resale pipeline — full load:
     1. Fetch HDB resale data from data.gov.sg API -> GCS + BigQuery (raw_hdb.hdb_resale)
     2. Geocode street names via OneMap API -> GCS + BigQuery (raw_hdb.hdb_locations)
     3. Run dbt models (staging + marts)
@@ -832,4 +832,4 @@ tasks:
 errors:
   - id: notify_failure
     type: io.kestra.plugin.core.log.Log
-    message: "HDB backfill FAILED. Check logs above for details."
+    message: "HDB pipeline FAILED. Check logs above for details."
